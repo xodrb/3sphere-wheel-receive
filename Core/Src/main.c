@@ -27,6 +27,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include <math.h>
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,6 +37,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+#define ADC_MAX 4020    // 실제 최대값
+#define ADC_MIN 0
+#define ADC_NEU 2010	//ADC 중간값 4020/2
+#define ADC_DEAD_ZONE 200	//데드존 처리 100
+
+#define ROTATION_CONST -0.5f    // 회전 상수
+
+#define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
+
 
 /* USER CODE END PD */
 
@@ -45,23 +55,26 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+IWDG_HandleTypeDef hiwdg;
+
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-const int ADC_MAX = 4020;    // 실제 최대값
-const int ADC_MIN = 0;
-#define ADC_NEU 2010	//ADC 중간값 4020/2
-#define ADC_DEAD_ZONE 200	//데드존 처리 100
+uint8_t rx_address[5] = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7}; // 수신 파이프 주소를 송신부와 동일하게 설정
 
-#define ROTATION_CONST -0.5f    // 회전 상수
+//interrupt flag
+volatile uint8_t nrf_irq_flag = 0;
+volatile uint8_t watchdog_flag = 0;
 
-#define USE_ADC_FALLBACK 1  // 1이면 무선 없을 때 ADC로 대체
-
-static uint32_t no_signal_count = 0;
+//system state
+static uint16_t last_rx_ms = 0;
+static uint16_t pwm_active = 0;
+static uint32_t no_signal_count = 0;	//시그널이 없을때 UART디버그용
 
 /* USER CODE END PV */
 
@@ -71,22 +84,23 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_IWDG_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
-
+//함수선언
+void nrf24_receiver_setup(void);
+void nrf24_irq_service(void);
+void system_watchdog_service(void); // ★ Watchdog service function
+float NormalizeADC(int16_t delta);
+uint16_t ToPWMus(float value);
+void KiwiDrive(float vx, float vy, float omega);
+void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
+void PWM_Start(void);
+void PWM_StopAll(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-//함수 선언
-void nrf24_receiver_setup(void);
-int try_receive_nrf24(uint16_t *rawX, uint16_t *rawY, uint16_t *rawZ);
-float NormalizeADC(int16_t raw);
-uint16_t ToPWMus(float value);
-void KiwiDrive(float vx, float vy, float omega);
-void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
-
-
-uint8_t rx_address[5] = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7}; // 수신 파이프 주소를 송신부와 동일하게 설정
 
 /* USER CODE END 0 */
 
@@ -122,14 +136,13 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM1_Init();
   MX_USART2_UART_Init();
+  MX_IWDG_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-
   // nRF24 초기화 (수신기)
   nrf24_init();
   nrf24_receiver_setup();
+  HAL_TIM_Base_Start_IT(&htim3);	//TIM3 시작
 
   /* USER CODE END 2 */
 
@@ -140,25 +153,21 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  uint16_t rawX = ADC_NEU, rawY = ADC_NEU, rawZ = ADC_NEU;
-	  if(try_receive_nrf24(&rawX, &rawY, &rawZ)){
-		  float vx = NormalizeADC((int16_t)rawX); // 부호 있어야함
-		  float vy = NormalizeADC((int16_t)rawY);
-		  float omega = NormalizeADC((int16_t)rawZ);
-
-		  KiwiDrive(vx, vy, omega);
-		  DebugUART(rawX, rawY, rawZ);
-		  no_signal_count = 0;
-	  }else{
-		  // 통신 실패처리
-		  no_signal_count++;
-		  char buf[64];
-		  int len = snprintf(buf, sizeof(buf),
-				"No Signal: %lu\n", no_signal_count);
-
-		  HAL_UART_Transmit(&huart2, (uint8_t*)buf, len, HAL_MAX_DELAY);
+	  //---데이터 수신 이벤트 처리---
+	  if(nrf_irq_flag){
+		  nrf_irq_flag = 0;	//flag 내리기
+		  nrf24_irq_service();	//데이터 처리 함수 호출, 모터 제어
 	  }
-	  HAL_Delay(20);
+	  //---TIM3기반 와치독 이벤트 처리---
+	  if(watchdog_flag){
+		  watchdog_flag = 0;	//확인 후 flag 내림
+		  system_watchdog_service();	//와치독 함수 호출
+	  }
+
+	  //---저전력 모드 진입(WFI)---
+	  if(!nrf_irq_flag && !watchdog_flag){	//두개의 flag가 내려가 있으면 처리할 이벤트가 없으므로 WFI
+		  __WFI();
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -175,10 +184,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -200,6 +210,34 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_4;
+  hiwdg.Init.Reload = 4095;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
+
 }
 
 /**
@@ -324,6 +362,51 @@ static void MX_TIM1_Init(void)
 }
 
 /**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 7200-1;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 500-1;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -383,12 +466,98 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : PA4 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
+	//nRF24L01 모듈이 데이터를 수신하면 PA4 IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
+	if(GPIO_Pin == GPIO_PIN_4){	//이 인터럽트가 PA4핀에서 발생했으면
+		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
+	}
+}
+
+void nrf24_irq_service(void){
+	nrf24_stop_listen();
+	uint8_t st = nrf24_r_reg(STATUS, 1);
+
+	if(st & (1<<6)){
+		uint8_t buf[6];
+		nrf24_receive(buf,6);
+
+		// 6바이트 2진 언패킹(unpacking)
+		uint16_t rawX = (uint16_t)buf[0] | ((uint16_t)buf[1] << 8);
+		uint16_t rawY = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+		uint16_t rawZ = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+
+		if(!pwm_active){
+			PWM_Start();
+		}
+
+		//읽어온 값을 실제 모터 제어값으로 정규화
+		float vx = NormalizeADC((int16_t)rawX); // 부호 있어야함
+		float vy = NormalizeADC((int16_t)rawY);
+		float omega = NormalizeADC((int16_t)rawZ);
+
+		//변환된 값으로 키위 드라이브 알고리즘을 실행, 모터 구동
+		KiwiDrive(vx, vy, omega);
+
+		//TIM3 워치독을 위해 마지막으로 데이터를 수신한 시간을 현재시간으로 갱신
+		last_rx_ms = HAL_GetTick();
+
+		//nrf24의 RX_DR상태 비터를 0으로 claer, 다음 인터럽트 받을 준비
+		nrf24_clear_rx_dr();
+	}
+
+	nrf24_listen();	//데이터 수신 대기모드
+
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim){
+	//50ms마다 발생하는 인터럽트(TIM3)
+	if(htim->Instance == TIM3){	//이 인터럽트가 TIM3에서 발생했으면
+		watchdog_flag = 1;	//Main 루프에 점검할 시간이라고 플래그 올림
+	}
+}
+
+void system_watchdog_service(void){	//워치독 서비스
+	if(pwm_active){
+		//모터가 동작 중일때만 감시 수행
+		if((HAL_GetTick() - last_rx_ms) > RX_TIMEOUT_MS){	//현재시간과 마지막 데이터 수신 시간의 차이가 타임아웃(100ms)를 초과했다면
+			PWM_StopAll();	//모든 모터 정지
+		}
+	}
+}
+
+void PWM_Start(void){
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+	pwm_active = 1;	//시스템 상태를 pwm 활성화로 변경하는 플래그
+}
+
+//모든 채널의 PWM 완전 정지
+void PWM_StopAll(void){
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
+    HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+
+    pwm_active = 0;
+}
+
 void nrf24_receiver_setup(void){
     nrf24_defaults();                               //레지스터 기본값으로 리셋
     HAL_Delay(5);                                   //전원, spi안정화 대기(최소 4.5ms이상 필요)
@@ -407,11 +576,20 @@ void nrf24_receiver_setup(void){
     nrf24_auto_ack_all(disable);
     nrf24_dpl(disable); //ack 비활성화
     nrf24_set_payload_size(6);
+
+    uint8_t cfg = nrf24_r_reg(CONFIG, 1);
+    // TX_DS와 MAX_RT 인터럽트는 비활성화(Mask)하고, RX_DR만 남겨둔다.
+    cfg |= (1 << 5) | (1 << 4); // Bit 5와 4를 1로 만듦(비활성화)
+    cfg &= ~(1 << 6);           // Bit 6은 0으로 만듦 (RX_DR 활성화)
+    nrf24_w_reg(CONFIG, &cfg, 1);
+
     nrf24_open_rx_pipe(0, rx_address);              //파이프 0에 수신주소 설정
     nrf24_listen();                                 //CE=high => 실제 수신 대기모드 진입
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_4);	//인터럽트 플래그 초기화
+
 }
 
-
+/*
 int try_receive_nrf24(uint16_t *rawX, uint16_t *rawY, uint16_t *rawZ){
     if (!nrf24_data_available()){
     	return 0;
@@ -433,7 +611,7 @@ int try_receive_nrf24(uint16_t *rawX, uint16_t *rawY, uint16_t *rawZ){
     }
     return 1;
 }
-
+*/
 
 float NormalizeADC(int16_t raw){
     int16_t delta = raw - ADC_NEU;
@@ -473,7 +651,6 @@ void KiwiDrive(float vx, float vy, float omega){
 	    Mbl  /= maxM;
 	    Mbr  /= maxM;
 	}
-
 
 	//PWM(us)변환 후 TIM1 채널에 출력
 	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ToPWMus(Mtop)); //PA9 TIM1_CH2
