@@ -65,6 +65,7 @@ void Error_Handler(void);
 #define CE_Pin_GPIO_Port GPIOA
 #define E_Stop_Pin GPIO_PIN_6
 #define E_Stop_GPIO_Port GPIOB
+#define E_Stop_EXTI_IRQn EXTI9_5_IRQn
 
 /* USER CODE BEGIN Private defines */
 

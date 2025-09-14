@@ -489,6 +489,10 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(E_Stop_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
@@ -496,9 +500,12 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
-	//nRF24L01 모듈이 데이터를 수신하면 PA4 IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
-	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PA4핀에서 발생했으면
+	//nRF24L01 모듈이 데이터를 수신하면 PC IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
+	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PC8핀에서 발생했으면
 		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
+	}else if(GPIO_Pin == GPIO_PIN_6){
+		//비상 정지버튼 E-STOP에서 인터럽트가 발생했다면
+		PWM_StopAll();	//모든 pwm중지
 	}
 }
 
