@@ -95,7 +95,7 @@ float NormalizeADC(int16_t delta);
 uint16_t ToPWMus(float value);
 void KiwiDrive(float vx, float vy, float omega);
 void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
-void PWM_Start(void);
+void PWM_StartNeutral(void);
 void PWM_StopAll(void);
 /* USER CODE END PFP */
 
@@ -455,26 +455,39 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, CSN_Pin_Pin|CE_Pin_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(CSN_Pin_GPIO_Port, CSN_Pin_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : CSN_Pin_Pin CE_Pin_Pin */
-  GPIO_InitStruct.Pin = CSN_Pin_Pin|CE_Pin_Pin;
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(CE_Pin_GPIO_Port, CE_Pin_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : CSN_Pin_Pin */
+  GPIO_InitStruct.Pin = CSN_Pin_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(CSN_Pin_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PA4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  /*Configure GPIO pin : CE_Pin_Pin */
+  GPIO_InitStruct.Pin = CE_Pin_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(CE_Pin_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : E_Stop_Pin */
+  GPIO_InitStruct.Pin = E_Stop_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI4_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI4_IRQn);
+  HAL_GPIO_Init(E_Stop_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -484,7 +497,7 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	//nRF24L01 모듈이 데이터를 수신하면 PA4 IRQ핀에 하강엣지 트리거 발생, 위 콜백함수 호출
-	if(GPIO_Pin == GPIO_PIN_4){	//이 인터럽트가 PA4핀에서 발생했으면
+	if(GPIO_Pin == GPIO_PIN_8){	//이 인터럽트가 PA4핀에서 발생했으면
 		nrf_irq_flag = 1;	//Main 루프에 데이터 도착 플래그 올림
 	}
 }
@@ -503,7 +516,7 @@ void nrf24_irq_service(void){
 		uint16_t rawZ = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
 
 		if(!pwm_active){
-			PWM_Start();
+			PWM_StartNeutral();
 		}
 
 		//읽어온 값을 실제 모터 제어값으로 정규화
@@ -541,7 +554,13 @@ void system_watchdog_service(void){	//워치독 서비스
 	}
 }
 
-void PWM_Start(void){
+void PWM_StartNeutral(void){
+	//초기 PWM 중립 세팅
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 1500);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 1500);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 1500);
+
+    //PWM 시작
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
@@ -585,7 +604,7 @@ void nrf24_receiver_setup(void){
 
     nrf24_open_rx_pipe(0, rx_address);              //파이프 0에 수신주소 설정
     nrf24_listen();                                 //CE=high => 실제 수신 대기모드 진입
-    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_4);	//인터럽트 플래그 초기화
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_8);	//인터럽트 플래그 초기화
 
 }
 
