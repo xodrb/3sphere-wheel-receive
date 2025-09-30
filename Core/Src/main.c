@@ -704,7 +704,7 @@ uint16_t ToPWMus(float v){
 	return(uint16_t)((v + 1.0f) * 500.0f + 1000.0f);
 }
 
-void KiwiDrive(float vx, float vy, float omega){
+void KiwiDrive(float vx, float vy, float omega){	//임의로 설정 1.0*vy, 0.7*vx는 횡이동이 잘됨 하지만 대각이동은 안됨
 	float Rw = ROTATION_CONST * omega;
 
 	float Mtop = 1.0f *vx + Rw;
