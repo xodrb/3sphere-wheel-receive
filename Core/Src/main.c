@@ -37,10 +37,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define ADC_MAX 4020    // 실제 최대값
+#define ADC_MAX 4090     // 실제 최대값
 #define ADC_MIN 0
-#define ADC_NEU 2010	//ADC 중간값 4020/2
-#define ADC_DEAD_ZONE 200	//데드존 처리 100
+#define ADC_NEU 2045	//ADC 중간값 4090/2
+#define ADC_DEAD_ZONE 500	//데드존 처리 100
 
 #define ROTATION_CONST -0.5f    // 회전 상수
 
@@ -76,7 +76,6 @@ volatile uint8_t watchdog_flag = 0;
 //system state
 static uint16_t last_rx_ms = 0;
 static uint16_t pwm_active = 0;
-static uint32_t no_signal_count = 0;	//시그널이 없을때 UART디버그용
 
 /* USER CODE END PV */
 
@@ -575,13 +574,13 @@ void nrf24_irq_service(void){
 		//변환된 값으로 키위 드라이브 알고리즘을 실행, 모터 구동
 		KiwiDrive(vx, vy, omega);
 
+		DebugUART(rawX, rawY, rawZ);
 		//TIM3 워치독을 위해 마지막으로 데이터를 수신한 시간을 현재시간으로 갱신
 		last_rx_ms = HAL_GetTick();
 
 		//nrf24의 RX_DR상태 비터를 0으로 claer, 다음 인터럽트 받을 준비
 		nrf24_clear_rx_dr();
 	}
-
 	nrf24_listen();	//데이터 수신 대기모드
 
 }
@@ -709,8 +708,8 @@ void KiwiDrive(float vx, float vy, float omega){
 	float Rw = ROTATION_CONST * omega;
 
 	float Mtop = 1.0f *vx + Rw;
-	float Mbl = 0.866f*vy -0.5f*vx + Rw;
-	float Mbr = -0.866f*vy -0.5f*vx + Rw;
+	float Mbl = 1.0f*vy -0.7f*vx + Rw;
+	float Mbr = -1.0f*vy -0.7f*vx + Rw;
 
 	float maxM = fmaxf(fabsf(Mtop), fmaxf(fabsf(Mbl), fabsf(Mbr)));
 	if (maxM > 1.0f) {
