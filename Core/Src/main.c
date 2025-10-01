@@ -42,7 +42,7 @@
 #define ADC_NEU 2045	//ADC 중간값 4090/2
 #define ADC_DEAD_ZONE 500	//데드존 처리 100
 
-#define ROTATION_CONST -0.5f    // 회전 상수
+#define ROTATION_CONST -0.85f    // 회전 상수
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
 
