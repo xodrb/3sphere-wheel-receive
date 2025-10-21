@@ -40,11 +40,13 @@
 #define ADC_MAX 4090     // 실제 최대값
 #define ADC_MIN 0
 #define ADC_NEU 2045	//ADC 중간값 4090/2
-#define ADC_DEAD_ZONE 500	//데드존 처리 100
+#define ADC_DEAD_ZONE 300	//데드존 처리 100
 
 #define ROTATION_CONST -0.85f    // 회전 상수
 
 #define RX_TIMEOUT_MS 100	//안정장치-100ms동안 조종기 신호가 없으면 통신이 끊겼다고 판단하고 모터를 정지시킴
+
+#define MAX_ERPM 5000.0f
 
 
 /* USER CODE END PD */
@@ -94,7 +96,7 @@ void nrf24_receiver_setup(void);
 void nrf24_irq_service(void);
 void system_watchdog_service(void); // ★ Watchdog service function
 float NormalizeADC(int16_t delta);
-uint16_t ToPWMus(float value);
+uint16_t SpeedToPWMus(float value);
 void KiwiDrive(float vx, float vy, float omega);
 void DebugUART(uint16_t rawX, uint16_t rawY, uint16_t rawZ);
 void PWM_StartNeutral(void);
@@ -695,21 +697,27 @@ float NormalizeADC(int16_t raw){
     }
 }
 
-uint16_t ToPWMus(float v){
-	if(v > 1.0f){
-		v = 1.0f;
-	}else if(v < -1.0f){
-		v = -1.0f;
-	}
-	return(uint16_t)((v + 1.0f) * 500.0f + 1000.0f);
+uint16_t SpeedToPWMus(float speed_fraction) {
+    // speed_fraction은 -1.0 ~ 1.0 범위의 값
+    float target_erpm = speed_fraction * MAX_ERPM; // 목표 ERPM 계산
+
+    // 목표 ERPM을 1000us ~ 2000us 범위의 PWM 펄스 폭으로 변환
+    float pulse_width = 1500.0f + (target_erpm / MAX_ERPM) * 500.0f;
+
+    // 안전장치
+    if (pulse_width > 2000.0f) pulse_width = 2000.0f;
+    if (pulse_width < 1000.0f) pulse_width = 1000.0f;
+
+    return (uint16_t)pulse_width;
 }
 
 void KiwiDrive(float vx, float vy, float omega){	//임의로 설정 1.0*vy, 0.7*vx는 횡이동이 잘됨 하지만 대각이동은 안됨
 	float Rw = ROTATION_CONST * omega;
 
-	float Mtop = 1.0f *vx + Rw;
-	float Mbl = 1.0f*vy -0.7f*vx + Rw;
-	float Mbr = -1.0f*vy -0.7f*vx + Rw;
+    // 보정 계수가 없는, 순수하고 올바른 표준 수학 모델
+    float Mtop = 1.0f * vx + Rw;
+    float Mbl  = 0.866f * vy - 0.5f * vx + Rw;
+    float Mbr  = -0.866f * vy - 0.5f * vx + Rw;
 
 	float maxM = fmaxf(fabsf(Mtop), fmaxf(fabsf(Mbl), fabsf(Mbr)));
 	if (maxM > 1.0f) {
@@ -719,9 +727,9 @@ void KiwiDrive(float vx, float vy, float omega){	//임의로 설정 1.0*vy, 0.7*
 	}
 
 	//PWM(us)변환 후 TIM1 채널에 출력
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ToPWMus(Mtop)); //PA9 TIM1_CH2
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ToPWMus(Mbl));	 //PA10 TIM1_CH3
-	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, ToPWMus(Mbr));	 //PA11 TIM1_CH4
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, SpeedToPWMus(Mtop)); //PA9 TIM1_CH2
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, SpeedToPWMus(Mbl));	 //PA10 TIM1_CH3
+	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, SpeedToPWMus(Mbr));	 //PA11 TIM1_CH4
 }
 
 
