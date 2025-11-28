@@ -59,8 +59,6 @@
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan;
 
-IWDG_HandleTypeDef hiwdg;
-
 SPI_HandleTypeDef hspi1;
 
 TIM_HandleTypeDef htim1;
@@ -76,8 +74,11 @@ volatile uint8_t nrf_irq_flag = 0;
 volatile uint8_t watchdog_flag = 0;
 
 //system state
-static uint16_t last_rx_ms = 0;
+static uint32_t last_rx_ms = 0;
 static uint16_t pwm_active = 0;
+
+//E stop 래치 플래그
+volatile estop_latched =0;
 
 /* USER CODE END PV */
 
@@ -87,7 +88,6 @@ static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_IWDG_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_CAN_Init(void);
 /* USER CODE BEGIN PFP */
@@ -140,7 +140,6 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM1_Init();
   MX_USART2_UART_Init();
-  MX_IWDG_Init();
   MX_TIM3_Init();
   MX_CAN_Init();
   /* USER CODE BEGIN 2 */
@@ -189,11 +188,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -251,34 +249,6 @@ static void MX_CAN_Init(void)
   /* USER CODE BEGIN CAN_Init 2 */
 
   /* USER CODE END CAN_Init 2 */
-
-}
-
-/**
-  * @brief IWDG Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_IWDG_Init(void)
-{
-
-  /* USER CODE BEGIN IWDG_Init 0 */
-
-  /* USER CODE END IWDG_Init 0 */
-
-  /* USER CODE BEGIN IWDG_Init 1 */
-
-  /* USER CODE END IWDG_Init 1 */
-  hiwdg.Instance = IWDG;
-  hiwdg.Init.Prescaler = IWDG_PRESCALER_4;
-  hiwdg.Init.Reload = 4095;
-  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN IWDG_Init 2 */
-
-  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -548,10 +518,22 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin){
 	}else if(GPIO_Pin == GPIO_PIN_6){
 		//비상 정지버튼 E-STOP에서 인터럽트가 발생했다면
 		PWM_StopAll();	//모든 pwm중지
+		estop_latched = 1;
 	}
 }
 
 void nrf24_irq_service(void){
+	// E-Stop 잠금 확인
+	// E-Stop이 한번이라도 눌렸으면 1, 모든 NRF 패킷을 무시함.
+	if(estop_latched) {
+		nrf24_stop_listen();
+		uint8_t st = nrf24_r_reg(STATUS, 1);
+		if(st & (1<<6)) {
+			nrf24_clear_rx_dr(); // IRQ 플래그만 제거
+		}
+		nrf24_listen();
+		return; // 모터 제어 로직을 실행하지 않고 즉시 종료
+	}
 	nrf24_stop_listen();
 	uint8_t st = nrf24_r_reg(STATUS, 1);
 
@@ -595,6 +577,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef* htim){
 }
 
 void system_watchdog_service(void){	//워치독 서비스
+	// E-Stop이 눌렸으면 통신 감시도 중지
+	if(estop_latched) {
+			if(pwm_active) {
+				PWM_StopAll(); // 혹시 모르니 다시 한번 정지
+			}
+			return;
+		}
+
 	if(pwm_active){
 		//모터가 동작 중일때만 감시 수행
 		if((HAL_GetTick() - last_rx_ms) > RX_TIMEOUT_MS){	//현재시간과 마지막 데이터 수신 시간의 차이가 타임아웃(100ms)를 초과했다면
@@ -639,7 +629,7 @@ void nrf24_receiver_setup(void){
     nrf24_clear_tx_ds();
     nrf24_clear_max_rt();
 
-    nrf24_set_channel(40); //무선 채널 40설정
+    nrf24_set_channel(77); //무선 채널 40설정
     nrf24_data_rate(_1mbps);
     nrf24_auto_ack_all(disable);
     nrf24_dpl(disable); //ack 비활성화
