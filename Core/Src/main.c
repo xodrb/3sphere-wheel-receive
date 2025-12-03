@@ -629,7 +629,7 @@ void nrf24_receiver_setup(void){
     nrf24_clear_tx_ds();
     nrf24_clear_max_rt();
 
-    nrf24_set_channel(77); //무선 채널 40설정
+    nrf24_set_channel(40); //무선 채널 40설정
     nrf24_data_rate(_1mbps);
     nrf24_auto_ack_all(disable);
     nrf24_dpl(disable); //ack 비활성화
